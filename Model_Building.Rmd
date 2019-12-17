@@ -1,0 +1,186 @@
+---
+title: "Model Building 2"
+author: "Rifky - Dexibit"
+date: "9/4/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load all the packages needed
+
+```{r}
+suppressWarnings(suppressMessages(library(readxl)))
+suppressWarnings(suppressMessages(library(dplyr)))
+suppressWarnings(suppressMessages(library(tidyr)))
+suppressWarnings(suppressMessages(library(darksky)))
+suppressWarnings(suppressMessages(library(xts)))
+suppressWarnings(suppressMessages(library(purrr)))
+suppressWarnings(suppressMessages(library(caret)))
+suppressWarnings(suppressMessages(library(rvest)))
+suppressWarnings(suppressMessages(library(ggplot2)))
+suppressWarnings(suppressMessages(library(forecast)))
+suppressWarnings(suppressMessages(library(tseries)))
+suppressWarnings(suppressMessages(library(lubridate)))
+suppressWarnings(suppressMessages(library(Hmisc)))
+suppressWarnings(suppressMessages(library(urca)))
+suppressWarnings(suppressMessages(library(car)))
+suppressWarnings(suppressMessages(library(normwhn.test)))
+suppressWarnings(suppressMessages(library(fpp)))
+```
+
+# Load the Data
+
+```{r, warning=FALSE}
+total_visitors = read_excel("Total_Visitors_v3.xlsx")
+cols = c(colnames(total_visitors[,5:14]))
+total_visitors[cols] = lapply(total_visitors[cols], factor)
+total_visitors$total_opening = as.numeric(total_visitors$total_opening)
+cols = c(colnames(total_visitors[,45:128]))
+total_visitors[cols] = lapply(total_visitors[cols], as.numeric)
+```
+
+# Split the data into Training and Testing
+
+```{r}
+# Exclude closed day
+#total_visitors = total_visitors[total_visitors$venue_closed == 0 & total_visitors$Tram_Counts != 0,]
+
+# Re-order the factor level
+total_visitors$day = relevel(total_visitors$day, ref = '7')
+total_visitors$month = relevel(total_visitors$month, ref = '12')
+#total_visitors$season = relevel(total_visitors$season, ref = 'Winter')
+
+# Split the Data into Training and Testing
+#total_visitors = total_visitors %>% filter(Date>='2017-01-01' & Date<='2019-01-01')
+#total_visitors_training = total_visitors %>% filter(Date>='2015-01-08' & Date<='2019-01-02')
+total_visitors_training = total_visitors %>% filter(Date>='2017-01-01' & Date<='2019-01-01')
+total_visitors_testing = total_visitors %>% filter(Date>='2019-01-01' & Date<='2019-05-14')
+```
+
+# MAPE Function
+
+```{r}
+library(MLmetrics)
+mapeSummary <- function(data, lev = NULL, model = NULL) {
+  mape_val <- MAPE(y_pred = data$pred, y_true = data$obs)
+  c(MAPE = mape_val)
+}
+
+```
+
+# Random Forest Model
+
+```{r}
+# Create the model framework
+set.seed(123456)
+
+# Specify the selected variables (Including the response variable)
+cols=c("Tram_Counts","space_center_visitation_pred","day","month","public_holiday","school_holiday","venue_closed","total_opening","SUM_precipIntensity","AVG_temperature","space_center_houston_ww","Tram_Counts_AVG_7","Tram_Counts_Lag_1")
+
+myControl = trainControl(method = "timeslice", initialWindow=1090, horizon=1, fixedWindow = FALSE, verboseIter = TRUE, returnResamp = "all", summaryFunction = mapeSummary, search="random")
+
+# Building the model
+rf_model = train(Tram_Counts ~ ., tuneLength = 10, data = total_visitors_training[,cols], method = "ranger", 
+                importance= "impurity", metric="MAPE", maximize=FALSE, num.trees = 1000, trControl = myControl, preProcess = c("center","scale"), na.action = na.omit)
+
+# Print the model
+print(rf_model)
+summary(rf_model)
+
+# Save the model
+saveRDS(rf_model, "rf_model.rds")
+
+# estimate variable importance
+rf_importance = varImp(rf_model, scale=FALSE)
+
+# summarize importance
+print(rf_importance)
+
+# plot importance
+plot(rf_importance)
+
+# Apply the model to training and testing data
+#total_visitors_training$prediction_rf = predict(rf_model, newdata=total_visitors_training)
+total_visitors_testing$prediction_rf = predict(rf_model, newdata=total_visitors_testing)
+
+# Calculate the Model Performance Using MAPE on Testing Data
+#mape(total_visitors_training$Tram_Counts, total_visitors_training$prediction_rf)
+mape(total_visitors_testing$Tram_Counts, total_visitors_testing$prediction_rf)
+
+# Visualize the Error
+total_visitors_testing$error_rf = abs(total_visitors_testing$Tram_Counts - total_visitors_testing$prediction_rf)
+ggplot(total_visitors_testing, aes(Date, error_rf)) + geom_line()
+
+# Load the model
+rf_model = readRDS("rf_model.rds")
+
+```
+
+# Extreme Gradient Boosting Model
+
+```{r}
+# Create the model framework
+set.seed(123456)
+
+# Specify the selected variables (Including the response variable)
+cols=c("Tram_Counts","space_center_visitation_pred","day","month","public_holiday","school_holiday","venue_closed","total_opening","SUM_precipIntensity","AVG_temperature","space_center_houston_ww","Tram_Counts_AVG_7","Tram_Counts_Lag_1")
+
+myControl = trainControl(method = "timeslice", initialWindow=1445, horizon=1, fixedWindow = FALSE, verboseIter = TRUE, summaryFunction = mapeSummary)
+
+# Specify the parameters
+tune_grid = expand.grid(eta= c(0.025, 0.05, 0.075, 0.1), 
+                        nrounds = c(50, 100, 200, 400, 800), 
+                        max_depth = c(2, 3, 4, 5, 6),
+                        min_child_weight = c(1, 2, 2.25, 2.5), 
+                        colsample_bytree = c(0.5, 0.6, 0.7, 0.8), 
+                        gamma = 0, 
+                        subsample = 1)
+
+xgb_model = train(Tram_Counts~., data = total_visitors_training[,cols], method = "xgbTree", 
+                  tuneGrid = tune_grid, metric = "MAPE", maximize=FALSE, trControl = myControl, preProcess = c("center","scale"), na.action = na.omit)
+
+# Save the model
+saveRDS(xgb_model, "xgb_model_2.rds")
+
+# Print the model
+print(xgb_model)
+
+# estimate variable importance
+xgb_importance = varImp(xgb_model, scale=FALSE)
+
+# summarize importance
+print(xgb_importance)
+
+# plot importance
+plot(xgb_importance)
+
+# Apply the model to training and testing data
+#total_visitors_training$prediction_xgb = predict(xgb_model, newdata=total_visitors_training)
+total_visitors_testing$prediction_xgb = predict(xgb_model, newdata=total_visitors_testing)
+
+# Calculate the Model Performance Using MAPE
+#mape(total_visitors_training$Tram_Counts, total_visitors_training$prediction_xgb)
+mape(total_visitors_testing$Tram_Counts, total_visitors_testing$prediction_xgb)
+
+# Visualize the Error
+total_visitors_testing$error_xgb = abs(total_visitors_testing$Tram_Counts - total_visitors_testing$prediction_xgb)
+ggplot(total_visitors_testing, aes(Date, error_xgb)) + geom_line()
+
+# Find the Date where the error is the maximum
+total_visitors_testing[total_visitors_testing$error_xgb==max(total_visitors_testing$error_xgb),"Date"]
+
+# Load the model
+xgb_model = readRDS("xgb_model.rds")
+
+```
+
+# Store the prediction result 
+
+```{r}
+prediction_testing_2 = total_visitors_testing[,c(1:2,134:135)]
+write.csv(prediction_testing_2, file = "prediction_testing_2.csv", row.names=FALSE)
+
+```
